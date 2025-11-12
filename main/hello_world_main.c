@@ -17,6 +17,7 @@
 #include "esp_netif.h"
 #include "lwip/inet.h"
 #include "esp_mac.h"
+#include "driver/gpio.h"
 
 #define EXAMPLE_ESP_WIFI_SSID      "ESP32_PROV"
 #define EXAMPLE_ESP_WIFI_PASS      "12345678"
@@ -306,6 +307,25 @@ static bool try_saved_wifi(void)
     return true;
 }
 
+// GPIO 34 monitoring task
+void gpio_monitor_task(void *pvParameter)
+{
+    // Configure GPIO 34 as input with pull-down
+    gpio_config_t io_conf = {};
+    io_conf.intr_type = GPIO_INTR_DISABLE;
+    io_conf.mode = GPIO_MODE_INPUT;
+    io_conf.pin_bit_mask = (1ULL << 34);
+    io_conf.pull_down_en = 1;
+    io_conf.pull_up_en = 0;
+    gpio_config(&io_conf);
+
+    while (1) {
+        int level = gpio_get_level(34);
+        printf("GPIO34 level: %d\n", level);
+        vTaskDelay(100 / portTICK_PERIOD_MS);  // Delay for 100ms
+    }
+}
+
 void app_main(void)
 {
     // Initialize NVS
@@ -400,6 +420,9 @@ void app_main(void)
            (chip_info.features & CHIP_FEATURE_EMB_FLASH) ? "embedded" : "external");
 
     printf("Minimum free heap size: %" PRIu32 " bytes\n", esp_get_minimum_free_heap_size());
+
+    // Create GPIO monitoring task
+    xTaskCreate(gpio_monitor_task, "gpio_monitor_task", 2048, NULL, 10, NULL);
 
     // Commenting out the restart loop to keep the WiFi and web server running
     /*
