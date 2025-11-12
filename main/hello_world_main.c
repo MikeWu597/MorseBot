@@ -22,10 +22,11 @@
 #define EXAMPLE_ESP_WIFI_SSID      "ESP32_PROV"
 #define EXAMPLE_ESP_WIFI_PASS      "12345678"
 #define EXAMPLE_MAX_STA_CONN       4
-#define SILENCE_RESET_THRESHOLD    6000  // milliseconds
+#define SILENCE_RESET_THRESHOLD    3000  // milliseconds
 #define INITIAL_DOT_DASH_THRESHOLD 300   // milliseconds
 #define MAX_MORSE_CODE_LEN         10   // Maximum length of a single morse code
 #define MAX_WORD_LEN               20   // Maximum morse codes in a word
+#define MAX_SENTENCE_LEN           100  // Maximum characters in a sentence
 
 #ifndef MIN
 #define MIN(x, y) (((x) < (y)) ? (x) : (y))
@@ -345,58 +346,147 @@ void gpio_monitor_task(void *pvParameter)
     int last_level = 0;
     uint32_t last_signal_time = 0;
     uint32_t dot_dash_threshold = INITIAL_DOT_DASH_THRESHOLD;  // Initial threshold
-    uint32_t total_duration = 0;
-    uint32_t signal_count = 0;
+    uint32_t total_dot_duration = 0;   // Total duration of all dots
+    uint32_t total_dash_duration = 0;  // Total duration of all dashes
+    uint32_t dot_count = 0;            // Number of dots
+    uint32_t dash_count = 0;           // Number of dashes
     char morse_code[MAX_MORSE_CODE_LEN] = {0};  // Buffer for current morse code
     char decoded_word[MAX_WORD_LEN][MAX_MORSE_CODE_LEN] = {{0}};  // Buffer for decoded word
+    char sentence_buffer[MAX_SENTENCE_LEN] = {0};  // Buffer for complete sentence
     int morse_index = 0;
     int word_index = 0;
+    int sentence_index = 0;
     bool first_signal = true;  // Flag to track first signal
+    uint32_t silence_start_time = 0;  // Time when silence started
+    bool in_silence = true;  // Track if we're currently in a silent period
     
     while (1) {
         int level = gpio_get_level(34);
         uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
         
-        // Check for silence timeout (6 seconds)
+        // Handle silence timing for morse code spacing
+        if (level == 0 && !in_silence) {
+            // Just entered silence period
+            silence_start_time = current_time;
+            in_silence = true;
+        } else if (level == 1 && in_silence) {
+            // Just exited silence period
+            in_silence = false;
+            if (silence_start_time > 0) {
+                uint32_t silence_duration = current_time - silence_start_time;
+                
+                // Process inter-character and inter-word gaps
+                if (morse_index > 0) {
+                    // If we have accumulated morse code, handle character separation
+                    if (silence_duration >= 3 * dot_dash_threshold) {
+                        // Character separator (3 units)
+                        morse_code[morse_index] = '\0';
+                        if (word_index < MAX_WORD_LEN - 1) {
+                            strcpy(decoded_word[word_index], morse_code);
+                            word_index++;
+                        }
+                        morse_index = 0;
+                        memset(morse_code, 0, sizeof(morse_code));
+                        
+                        // If it's a word separator (7 units)
+                        if (silence_duration >= 7 * dot_dash_threshold) {
+                            // Process the completed word
+                            if (word_index > 0) {
+                                for (int i = 0; i < word_index; i++) {
+                                    // Find character in morse table
+                                    int j = 0;
+                                    while (morse_table[j].character != '\0') {
+                                        if (strcmp(morse_table[j].code, decoded_word[i]) == 0) {
+                                            if (sentence_index < MAX_SENTENCE_LEN - 1) {
+                                                sentence_buffer[sentence_index++] = morse_table[j].character;
+                                            }
+                                            break;
+                                        }
+                                        j++;
+                                    }
+                                    // If not found, add a question mark
+                                    if (morse_table[j].character == '\0') {
+                                        if (sentence_index < MAX_SENTENCE_LEN - 1) {
+                                            sentence_buffer[sentence_index++] = '?';
+                                        }
+                                    }
+                                }
+                                
+                                // Add space after word
+                                if (sentence_index < MAX_SENTENCE_LEN - 1) {
+                                    sentence_buffer[sentence_index++] = ' ';
+                                }
+                                
+                                // Reset word buffer
+                                word_index = 0;
+                                memset(decoded_word, 0, sizeof(decoded_word));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Check for sentence completion (6 seconds of silence)
         if ((current_time - last_signal_time) > SILENCE_RESET_THRESHOLD && last_signal_time > 0) {
-            // Decode any remaining morse code
+            // Process any remaining morse code
             if (morse_index > 0) {
                 morse_code[morse_index] = '\0';
-                strcpy(decoded_word[word_index], morse_code);
-                word_index++;
+                if (word_index < MAX_WORD_LEN - 1) {
+                    strcpy(decoded_word[word_index], morse_code);
+                    word_index++;
+                }
                 morse_index = 0;
-                memset(morse_code, 0, sizeof(morse_code));
             }
             
-            // Print decoded word if any
+            // Process any remaining word
             if (word_index > 0) {
-                printf("Decoded word: ");
                 for (int i = 0; i < word_index; i++) {
                     // Find character in morse table
                     int j = 0;
                     while (morse_table[j].character != '\0') {
                         if (strcmp(morse_table[j].code, decoded_word[i]) == 0) {
-                            printf("%c", morse_table[j].character);
+                            if (sentence_index < MAX_SENTENCE_LEN - 1) {
+                                sentence_buffer[sentence_index++] = morse_table[j].character;
+                            }
                             break;
                         }
                         j++;
                     }
-                    // If not found, print as is
+                    // If not found, add a question mark
                     if (morse_table[j].character == '\0') {
-                        printf("?");  // Unknown morse code
+                        if (sentence_index < MAX_SENTENCE_LEN - 1) {
+                            sentence_buffer[sentence_index++] = '?';
+                        }
                     }
                 }
-                printf("\n");
                 
-                // Reset word buffer
-                word_index = 0;
-                memset(decoded_word, 0, sizeof(decoded_word));
+                // Add space after word
+                if (sentence_index < MAX_SENTENCE_LEN - 1) {
+                    sentence_buffer[sentence_index++] = ' ';
+                }
             }
+            
+            // Print complete sentence if any
+            if (sentence_index > 0) {
+                sentence_buffer[sentence_index] = '\0';
+                printf("Decoded sentence: %s\n", sentence_buffer);
+                
+                // Reset sentence buffer
+                sentence_index = 0;
+                memset(sentence_buffer, 0, sizeof(sentence_buffer));
+            }
+            
+            // Reset word buffer
+            word_index = 0;
+            memset(decoded_word, 0, sizeof(decoded_word));
             
             // Reset adaptive threshold
             dot_dash_threshold = INITIAL_DOT_DASH_THRESHOLD;
-            total_duration = 0;
-            signal_count = 0;
+            total_dot_duration = 0;
+            total_dash_duration = 0;
+            dot_count = 0;
+            dash_count = 0;
             first_signal = true;  // Reset first signal flag
             printf("Threshold reset due to silence (6 seconds)\n");
             last_signal_time = 0;  // Prevent multiple resets
@@ -415,29 +505,47 @@ void gpio_monitor_task(void *pvParameter)
                     
                     // Ignore signals shorter than 30ms
                     if (press_duration < 30) {
-                        printf("Ignored short signal: %"PRIu32" ms\n", press_duration);
+                        // printf("Ignored short signal: %"PRIu32" ms\n", press_duration);
                     } else {
                         // For the first signal, use the initial threshold
+                        bool is_dot = false;
                         if (first_signal) {
-                            // Don't update statistics for the first signal
+                            // For first signal, compare with initial threshold
+                            is_dot = (press_duration < INITIAL_DOT_DASH_THRESHOLD);
                             first_signal = false;
                         } else {
-                            // Update statistics for adaptive threshold
-                            total_duration += press_duration;
-                            signal_count++;
-                            
-                            // Calculate new adaptive threshold (average of all signals)
-                            if (signal_count > 0) {
-                                dot_dash_threshold = total_duration / signal_count;
-                                // Ensure some minimum threshold
-                                if (dot_dash_threshold < 50) {
-                                    dot_dash_threshold = 50;
-                                }
+                            // For subsequent signals, compare with current threshold
+                            is_dot = (press_duration < dot_dash_threshold);
+                        }
+                        
+                        // Update statistics based on classification
+                        if (is_dot) {
+                            total_dot_duration += press_duration;
+                            dot_count++;
+                            // Calculate new threshold as midpoint between dot and dash averages
+                            if (dot_count > 0 && dash_count > 0) {
+                                uint32_t avg_dot = total_dot_duration / dot_count;
+                                uint32_t avg_dash = total_dash_duration / dash_count;
+                                dot_dash_threshold = (avg_dot + avg_dash) / 2;
+                            }
+                        } else {
+                            total_dash_duration += press_duration;
+                            dash_count++;
+                            // Calculate new threshold as midpoint between dot and dash averages
+                            if (dot_count > 0 && dash_count > 0) {
+                                uint32_t avg_dot = total_dot_duration / dot_count;
+                                uint32_t avg_dash = total_dash_duration / dash_count;
+                                dot_dash_threshold = (avg_dot + avg_dash) / 2;
                             }
                         }
                         
+                        // Ensure some minimum threshold
+                        if (dot_dash_threshold < 50) {
+                            dot_dash_threshold = 50;
+                        }
+                        
                         // Add dot or dash to morse code
-                        if (press_duration < dot_dash_threshold) {
+                        if (is_dot) {
                             if (morse_index < MAX_MORSE_CODE_LEN - 1) {
                                 morse_code[morse_index++] = '.';
                             }
