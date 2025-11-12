@@ -295,8 +295,12 @@ static bool try_saved_wifi(void)
     strcpy((char*)wifi_config.sta.ssid, ssid);
     strcpy((char*)wifi_config.sta.password, password);
     
+    // Ensure WiFi is in a configurable state
+    esp_wifi_disconnect();
+    esp_wifi_stop();
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
     ESP_ERROR_CHECK(esp_wifi_connect());
     
     return true;
@@ -314,10 +318,51 @@ void app_main(void)
     
     ESP_LOGI(TAG, "Starting WiFi provisioning example");
     
-    // Try to connect to saved WiFi first
-    wifi_init_softap();
+    // Check if we have saved WiFi credentials
+    nvs_handle_t nvs_handle;
+    bool has_saved_creds = false;
     
-    if (!try_saved_wifi()) {
+    if (nvs_open("wifi_creds", NVS_READONLY, &nvs_handle) == ESP_OK) {
+        char ssid[32] = {0};
+        size_t ssid_len = sizeof(ssid);
+        if (nvs_get_str(nvs_handle, "ssid", ssid, &ssid_len) == ESP_OK) {
+            has_saved_creds = true;
+        }
+        nvs_close(nvs_handle);
+    }
+    
+    if (has_saved_creds) {
+        // If we have saved credentials, only initialize STA mode
+        ESP_ERROR_CHECK(esp_netif_init());
+        ESP_ERROR_CHECK(esp_event_loop_create_default());
+        
+        sta_netif = esp_netif_create_default_wifi_sta();
+        
+        wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+        ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+        
+        ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL));
+        ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL));
+        
+        // Try to connect with saved credentials
+        if (try_saved_wifi()) {
+            ESP_LOGI(TAG, "Connected to saved WiFi network");
+        } else {
+            ESP_LOGI(TAG, "Failed to connect with saved credentials");
+            // Fall back to provisioning mode
+            ESP_LOGI(TAG, "No saved credentials found, starting provisioning mode");
+            // Start web server for provisioning
+            server = start_webserver();
+            if (server) {
+                ESP_LOGI(TAG, "Web server started. Connect to SSID '%s' with password '%s'", 
+                        EXAMPLE_ESP_WIFI_SSID, EXAMPLE_ESP_WIFI_PASS);
+                ESP_LOGI(TAG, "Then open http://192.168.4.1 in your browser to configure WiFi");
+            }
+        }
+    } else {
+        // No saved credentials, initialize in APSTA mode for provisioning
+        wifi_init_softap();
+
         ESP_LOGI(TAG, "No saved credentials found, starting provisioning mode");
         // Start web server for provisioning
         server = start_webserver();
@@ -326,8 +371,6 @@ void app_main(void)
                      EXAMPLE_ESP_WIFI_SSID, EXAMPLE_ESP_WIFI_PASS);
             ESP_LOGI(TAG, "Then open http://192.168.4.1 in your browser to configure WiFi");
         }
-    } else {
-        ESP_LOGI(TAG, "Connected to saved WiFi network");
     }
     
     // Continue with the original example code
