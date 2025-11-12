@@ -379,7 +379,7 @@ void gpio_monitor_task(void *pvParameter)
                 if (morse_index > 0) {
                     // If we have accumulated morse code, handle character separation
                     printf("Silence duration: %"PRIu32" ms\n", silence_duration);
-                    if (silence_duration >= 1 * dot_dash_threshold) {
+                    if (silence_duration >= 2 * dot_dash_threshold) {
                         // Character separator (3 units)
                         morse_code[morse_index] = '\0';
                         if (word_index < MAX_WORD_LEN - 1) {
@@ -565,7 +565,7 @@ void gpio_monitor_task(void *pvParameter)
             last_level = level;
         }
         
-        vTaskDelay(10 / portTICK_PERIOD_MS);  // Sample every 10ms
+        vTaskDelay(5 / portTICK_PERIOD_MS);  // Sample every 5ms
     }
 }
 
