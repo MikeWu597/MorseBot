@@ -22,6 +22,7 @@
 #define EXAMPLE_ESP_WIFI_SSID      "ESP32_PROV"
 #define EXAMPLE_ESP_WIFI_PASS      "12345678"
 #define EXAMPLE_MAX_STA_CONN       4
+#define SILENCE_RESET_THRESHOLD    6000  // milliseconds
 
 #ifndef MIN
 #define MIN(x, y) (((x) < (y)) ? (x) : (y))
@@ -319,10 +320,64 @@ void gpio_monitor_task(void *pvParameter)
     io_conf.pull_up_en = 0;
     gpio_config(&io_conf);
 
+    uint32_t press_start_time = 0;
+    uint32_t press_duration = 0;
+    int last_level = 0;
+    uint32_t last_signal_time = 0;
+    uint32_t dot_dash_threshold = 250;  // Initial threshold
+    uint32_t total_duration = 0;
+    uint32_t signal_count = 0;
+
     while (1) {
         int level = gpio_get_level(34);
-        printf("GPIO34 level: %d\n", level);
-        vTaskDelay(100 / portTICK_PERIOD_MS);  // Delay for 100ms
+        uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        
+        // Check for silence timeout (6 seconds)
+        if ((current_time - last_signal_time) > SILENCE_RESET_THRESHOLD) {
+            // Reset adaptive threshold
+            dot_dash_threshold = 250;
+            total_duration = 0;
+            signal_count = 0;
+            printf("Threshold reset due to silence (6 seconds)\n");
+        }
+        
+        // Detect signal transition
+        if (level != last_level) {
+            if (level == 1) {
+                // Signal went high - record start time
+                press_start_time = current_time;
+            } else {
+                // Signal went low - calculate duration
+                if (press_start_time > 0) {
+                    press_duration = current_time - press_start_time;
+                    last_signal_time = current_time;
+                    
+                    // Update statistics for adaptive threshold
+                    total_duration += press_duration;
+                    signal_count++;
+                    
+                    // Calculate new adaptive threshold (average of all signals)
+                    if (signal_count > 0) {
+                        dot_dash_threshold = total_duration / signal_count;
+                        // Ensure some minimum threshold
+                        if (dot_dash_threshold < 50) {
+                            dot_dash_threshold = 50;
+                        }
+                    }
+                    
+                    if (press_duration < dot_dash_threshold) {
+                        printf("Detected: dot (duration: %"PRIu32" ms, threshold: %"PRIu32" ms)\n", 
+                               press_duration, dot_dash_threshold);
+                    } else {
+                        printf("Detected: dash (duration: %"PRIu32" ms, threshold: %"PRIu32" ms)\n", 
+                               press_duration, dot_dash_threshold);
+                    }
+                }
+            }
+            last_level = level;
+        }
+        
+        vTaskDelay(10 / portTICK_PERIOD_MS);  // Sample every 10ms
     }
 }
 
