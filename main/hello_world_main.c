@@ -23,6 +23,9 @@
 #define EXAMPLE_ESP_WIFI_PASS      "12345678"
 #define EXAMPLE_MAX_STA_CONN       4
 #define SILENCE_RESET_THRESHOLD    6000  // milliseconds
+#define INITIAL_DOT_DASH_THRESHOLD 300   // milliseconds
+#define MAX_MORSE_CODE_LEN         10   // Maximum length of a single morse code
+#define MAX_WORD_LEN               20   // Maximum morse codes in a word
 
 #ifndef MIN
 #define MIN(x, y) (((x) < (y)) ? (x) : (y))
@@ -308,6 +311,23 @@ static bool try_saved_wifi(void)
     return true;
 }
 
+// Morse code to character mapping
+typedef struct {
+    char code[MAX_MORSE_CODE_LEN];
+    char character;
+} morse_code_map_t;
+
+static const morse_code_map_t morse_table[] = {
+    {".-", 'A'}, {"-...", 'B'}, {"-.-.", 'C'}, {"-..", 'D'}, {".", 'E'},
+    {"..-.", 'F'}, {"--.", 'G'}, {"....", 'H'}, {"..", 'I'}, {".---", 'J'},
+    {"-.-", 'K'}, {".-..", 'L'}, {"--", 'M'}, {"-.", 'N'}, {"---", 'O'},
+    {".--.", 'P'}, {"--.-", 'Q'}, {".-.", 'R'}, {"...", 'S'}, {"-", 'T'},
+    {"..-", 'U'}, {"...-", 'V'}, {".--", 'W'}, {"-..-", 'X'}, {"-.--", 'Y'},
+    {"--..", 'Z'}, {".----", '1'}, {"..---", '2'}, {"...--", '3'}, {"....-", '4'},
+    {".....", '5'}, {"-....", '6'}, {"--...", '7'}, {"---..", '8'}, {"----.", '9'},
+    {"-----", '0'}, {"", '\0'}  // End marker
+};
+
 // GPIO 34 monitoring task
 void gpio_monitor_task(void *pvParameter)
 {
@@ -324,21 +344,62 @@ void gpio_monitor_task(void *pvParameter)
     uint32_t press_duration = 0;
     int last_level = 0;
     uint32_t last_signal_time = 0;
-    uint32_t dot_dash_threshold = 250;  // Initial threshold
+    uint32_t dot_dash_threshold = INITIAL_DOT_DASH_THRESHOLD;  // Initial threshold
     uint32_t total_duration = 0;
     uint32_t signal_count = 0;
-
+    char morse_code[MAX_MORSE_CODE_LEN] = {0};  // Buffer for current morse code
+    char decoded_word[MAX_WORD_LEN][MAX_MORSE_CODE_LEN] = {{0}};  // Buffer for decoded word
+    int morse_index = 0;
+    int word_index = 0;
+    bool first_signal = true;  // Flag to track first signal
+    
     while (1) {
         int level = gpio_get_level(34);
         uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
         
         // Check for silence timeout (6 seconds)
-        if ((current_time - last_signal_time) > SILENCE_RESET_THRESHOLD) {
+        if ((current_time - last_signal_time) > SILENCE_RESET_THRESHOLD && last_signal_time > 0) {
+            // Decode any remaining morse code
+            if (morse_index > 0) {
+                morse_code[morse_index] = '\0';
+                strcpy(decoded_word[word_index], morse_code);
+                word_index++;
+                morse_index = 0;
+                memset(morse_code, 0, sizeof(morse_code));
+            }
+            
+            // Print decoded word if any
+            if (word_index > 0) {
+                printf("Decoded word: ");
+                for (int i = 0; i < word_index; i++) {
+                    // Find character in morse table
+                    int j = 0;
+                    while (morse_table[j].character != '\0') {
+                        if (strcmp(morse_table[j].code, decoded_word[i]) == 0) {
+                            printf("%c", morse_table[j].character);
+                            break;
+                        }
+                        j++;
+                    }
+                    // If not found, print as is
+                    if (morse_table[j].character == '\0') {
+                        printf("?");  // Unknown morse code
+                    }
+                }
+                printf("\n");
+                
+                // Reset word buffer
+                word_index = 0;
+                memset(decoded_word, 0, sizeof(decoded_word));
+            }
+            
             // Reset adaptive threshold
-            dot_dash_threshold = 250;
+            dot_dash_threshold = INITIAL_DOT_DASH_THRESHOLD;
             total_duration = 0;
             signal_count = 0;
+            first_signal = true;  // Reset first signal flag
             printf("Threshold reset due to silence (6 seconds)\n");
+            last_signal_time = 0;  // Prevent multiple resets
         }
         
         // Detect signal transition
@@ -352,25 +413,43 @@ void gpio_monitor_task(void *pvParameter)
                     press_duration = current_time - press_start_time;
                     last_signal_time = current_time;
                     
-                    // Update statistics for adaptive threshold
-                    total_duration += press_duration;
-                    signal_count++;
-                    
-                    // Calculate new adaptive threshold (average of all signals)
-                    if (signal_count > 0) {
-                        dot_dash_threshold = total_duration / signal_count;
-                        // Ensure some minimum threshold
-                        if (dot_dash_threshold < 50) {
-                            dot_dash_threshold = 50;
-                        }
-                    }
-                    
-                    if (press_duration < dot_dash_threshold) {
-                        printf("Detected: dot (duration: %"PRIu32" ms, threshold: %"PRIu32" ms)\n", 
-                               press_duration, dot_dash_threshold);
+                    // Ignore signals shorter than 30ms
+                    if (press_duration < 30) {
+                        printf("Ignored short signal: %"PRIu32" ms\n", press_duration);
                     } else {
-                        printf("Detected: dash (duration: %"PRIu32" ms, threshold: %"PRIu32" ms)\n", 
-                               press_duration, dot_dash_threshold);
+                        // For the first signal, use the initial threshold
+                        if (first_signal) {
+                            // Don't update statistics for the first signal
+                            first_signal = false;
+                        } else {
+                            // Update statistics for adaptive threshold
+                            total_duration += press_duration;
+                            signal_count++;
+                            
+                            // Calculate new adaptive threshold (average of all signals)
+                            if (signal_count > 0) {
+                                dot_dash_threshold = total_duration / signal_count;
+                                // Ensure some minimum threshold
+                                if (dot_dash_threshold < 50) {
+                                    dot_dash_threshold = 50;
+                                }
+                            }
+                        }
+                        
+                        // Add dot or dash to morse code
+                        if (press_duration < dot_dash_threshold) {
+                            if (morse_index < MAX_MORSE_CODE_LEN - 1) {
+                                morse_code[morse_index++] = '.';
+                            }
+                            printf("Detected: dot (duration: %"PRIu32" ms, threshold: %"PRIu32" ms)\n", 
+                                   press_duration, dot_dash_threshold);
+                        } else {
+                            if (morse_index < MAX_MORSE_CODE_LEN - 1) {
+                                morse_code[morse_index++] = '-';
+                            }
+                            printf("Detected: dash (duration: %"PRIu32" ms, threshold: %"PRIu32" ms)\n", 
+                                   press_duration, dot_dash_threshold);
+                        }
                     }
                 }
             }
@@ -477,7 +556,7 @@ void app_main(void)
     printf("Minimum free heap size: %" PRIu32 " bytes\n", esp_get_minimum_free_heap_size());
 
     // Create GPIO monitoring task
-    xTaskCreate(gpio_monitor_task, "gpio_monitor_task", 2048, NULL, 10, NULL);
+    xTaskCreate(gpio_monitor_task, "gpio_monitor_task", 4096, NULL, 10, NULL);
 
     // Commenting out the restart loop to keep the WiFi and web server running
     /*
