@@ -378,7 +378,8 @@ void gpio_monitor_task(void *pvParameter)
                 // Process inter-character and inter-word gaps
                 if (morse_index > 0) {
                     // If we have accumulated morse code, handle character separation
-                    if (silence_duration >= 3 * dot_dash_threshold) {
+                    printf("Silence duration: %"PRIu32" ms\n", silence_duration);
+                    if (silence_duration >= 1 * dot_dash_threshold) {
                         // Character separator (3 units)
                         morse_code[morse_index] = '\0';
                         if (word_index < MAX_WORD_LEN - 1) {
@@ -389,7 +390,7 @@ void gpio_monitor_task(void *pvParameter)
                         memset(morse_code, 0, sizeof(morse_code));
                         
                         // If it's a word separator (7 units)
-                        if (silence_duration >= 7 * dot_dash_threshold) {
+                        if (silence_duration >= 6 * dot_dash_threshold) {
                             // Process the completed word
                             if (word_index > 0) {
                                 for (int i = 0; i < word_index; i++) {
